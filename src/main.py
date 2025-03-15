@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run without sending to Claude (for testing)"
     )
+    mcp_group.add_argument(
+        "--auto-mode", "-a",
+        action="store_true",
+        help="Run in automatic mode without user input prompts (useful for CI/CD or Claude Code)"
+    )
     
     return parser.parse_args()
 
@@ -113,7 +118,8 @@ def main() -> int:
         args.test_path,
         args.filter,
         args.verbose,
-        args.max_iterations
+        args.max_iterations,
+        args.auto_mode
     )
     
     return 0 if success else 1
