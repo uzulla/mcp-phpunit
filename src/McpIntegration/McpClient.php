@@ -149,7 +149,9 @@ class McpClient
         foreach ($message['errors_by_file'] as $filePath => $errors) {
             $errorDetails .= "\nErrors in {$filePath}:\n";
             foreach ($errors as $error) {
-                $errorDetails .= "- Line {$error['line'] ?? 'unknown'}: {$error['message'] ?? 'No message'}\n";
+                $line = isset($error['line']) ? $error['line'] : 'unknown';
+                $errorMessage = isset($error['message']) ? $error['message'] : 'No message';
+                $errorDetails .= "- Line {$line}: {$errorMessage}\n";
             }
         }
         
@@ -174,8 +176,14 @@ class McpClient
             'messages' => [
                 [
                     'role' => 'user',
-                    'content' => "You are a PHP expert analyzing PHPUnit test failures and helping fix them."
-                    // Content truncated for brevity - full prompt in previous implementation
+                    'content' => "You are a PHP expert analyzing PHPUnit test failures and helping fix them. I need you to analyze the following test failures and suggest fixes.\n\n" .
+                    "PHPUnit Output:\n" . $phpunitErrorOutput . "\n\n" .
+                    "Error Details:\n" . $errorDetails . "\n\n" .
+                    "Please analyze the code and suggest fixes. Format your response with:\n\n" .
+                    "FILE_TO_MODIFY: [file path]\n" .
+                    "SEARCH: ```php\n[code to search for]\n```\n" .
+                    "REPLACE: ```php\n[code to replace with]\n```\n\n" .
+                    "You can suggest multiple fixes if needed. Be precise with the search patterns to ensure they match exactly."
                 ]
             ]
         ];
