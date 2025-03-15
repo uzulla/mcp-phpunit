@@ -149,8 +149,7 @@ class McpClient
         foreach ($message['errors_by_file'] as $filePath => $errors) {
             $errorDetails .= "\nErrors in {$filePath}:\n";
             foreach ($errors as $error) {
-                $errorDetails .= "- Line " . (isset($error['line']) ? $error['line'] : 'unknown') . ": " . 
-                                (isset($error['message']) ? $error['message'] : 'No message') . "\n";
+                $errorDetails .= "- Line {$error['line'] ?? 'unknown'}: {$error['message'] ?? 'No message'}\n";
             }
         }
         
@@ -301,6 +300,197 @@ class McpClient
         }
     }
     
+    public function applyFix(array $fix): bool
+    {
+        // Normalize the file path (sometimes it could start with '/' or './')
+        $normalizedPath = ltrim($fix['file_path'], './');
+        
+        // Try multiple ways to find the file
+        $possiblePaths = [
+            $this->projectPath . '/' . $normalizedPath,  // Standard path
+            $normalizedPath,                             // Maybe it's already absolute
+            realpath($normalizedPath)                    // Just in case it's relative to CWD
+        ];
+        
+        // Find the first existing file that's not in vendor directory
+        $filePath = null;
+        foreach ($possiblePaths as $path) {
+            if (file_exists($path) && strpos($path, 'vendor') === false) {
+                $filePath = $path;
+                break;
+            }
+        }
+        
+        // If no file found, try more targeted search in non-vendor directories,
+        // prioritizing src/ and tests/ directories
+        if ($filePath === null) {
+            // Try to find by basename in the project source directories only
+            $basename = basename($normalizedPath);
+            
+            // First look in src/ directory
+            $srcPath = $this->projectPath . '/src/' . $basename;
+            if (file_exists($srcPath)) {
+                $filePath = $srcPath;
+                echo "Found file in src directory: {$filePath}\n";
+            }
+            
+            // If not found, look in tests/ directory
+            if ($filePath === null) {
+                $testsPath = $this->projectPath . '/tests/' . $basename;
+                if (file_exists($testsPath)) {
+                    $filePath = $testsPath;
+                    echo "Found file in tests directory: {$filePath}\n";
+                }
+            }
+            
+            // If still not found, look in other non-vendor directories
+            if ($filePath === null) {
+                $iterator = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($this->projectPath)
+                );
+                
+                foreach ($iterator as $file) {
+                    if ($file->isFile() && $file->getFilename() === $basename) {
+                        $candidatePath = $file->getPathname();
+                        // Double check it's not in vendor
+                        if (strpos($candidatePath, 'vendor') === false) {
+                            $filePath = $candidatePath;
+                            echo "Found file by basename: {$filePath}\n";
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If still no file, give up
+        if ($filePath === null) {
+            echo "Error: File {$normalizedPath} does not exist\n";
+            echo "Tried paths: " . implode(', ', $possiblePaths) . "\n";
+            return false;
+        }
+        
+        try {
+            echo "Using file path: {$filePath}\n";
+            
+            // Read the file content
+            $content = file_get_contents($filePath);
+            
+            // Make a backup of the file
+            $backupPath = "{$filePath}.bak";
+            file_put_contents($backupPath, $content);
+            echo "Created backup at {$backupPath}\n";
+            
+            // First try exact match
+            if (strpos($content, $fix['search']) !== false) {
+                // Replace the search text with the replace text
+                $newContent = str_replace($fix['search'], $fix['replace'], $content);
+                
+                // Check PHP syntax before writing the file
+                $isValid = $this->checkPhpSyntax($newContent);
+                
+                if (!$isValid) {
+                    echo "WARNING: The proposed fix contains PHP syntax errors\n";
+                    
+                    // Try to automatically fix common syntax errors
+                    $patterns = [
+                        '/public\s+public\s+/' => 'public ',
+                        '/protected\s+protected\s+/' => 'protected ',
+                        '/private\s+private\s+/' => 'private ',
+                        '/public\s+protected\s+/' => 'protected ',
+                        '/protected\s+public\s+/' => 'protected ',
+                        '/public\s+private\s+/' => 'private ',
+                        '/private\s+public\s+/' => 'private '
+                    ];
+                    
+                    $fixedContent = $newContent;
+                    foreach ($patterns as $pattern => $replacement) {
+                        $fixedContent = preg_replace($pattern, $replacement, $fixedContent);
+                    }
+                    
+                    // Check if the fixed content is valid
+                    $isValidAfterFix = $this->checkPhpSyntax($fixedContent);
+                    
+                    if ($isValidAfterFix) {
+                        // Write the fixed content
+                        file_put_contents($filePath, $fixedContent);
+                        echo "Successfully applied fix to {$fix['file_path']} and corrected PHP syntax errors\n";
+                        return true;
+                    } else {
+                        echo "Could not fully correct PHP syntax errors. Skipping.\n";
+                        return false;
+                    }
+                } else {
+                    // No syntax errors, write the new content
+                    file_put_contents($filePath, $newContent);
+                    echo "Successfully applied fix to {$fix['file_path']} (exact match)\n";
+                    return true;
+                }
+            }
+            
+            // If exact match fails, try with more flexible approaches
+            // Try to extract a method name from the search string
+            $functionName = null;
+            
+            // Look for PHP methods/functions
+            $patterns = [
+                '/function\s+(\w+)/',
+                '/public\s+function\s+(\w+)/',
+                '/private\s+function\s+(\w+)/',
+                '/protected\s+function\s+(\w+)/'
+            ];
+            
+            foreach ($patterns as $pattern) {
+                if (preg_match($pattern, $fix['search'], $matches)) {
+                    $functionName = $matches[1];
+                    break;
+                }
+            }
+            
+            if ($functionName) {
+                echo "Extracted method name: {$functionName}\n";
+                
+                // If we found a method name, look for this method in the file
+                $methodPatterns = [
+                    // Try various method patterns
+                    "/function\s+{$functionName}\s*\([^{]*\{.*?\}/s",  // Basic function
+                    "/public\s+function\s+{$functionName}\s*\([^{]*\{.*?\}/s",  // Public method
+                    "/private\s+function\s+{$functionName}\s*\([^{]*\{.*?\}/s",  // Private method
+                    "/protected\s+function\s+{$functionName}\s*\([^{]*\{.*?\}/s"  // Protected method
+                ];
+                
+                foreach ($methodPatterns as $pattern) {
+                    $matches = [];
+                    if (preg_match_all($pattern, $content, $matches) === 1) {
+                        $matchedMethod = $matches[0][0];
+                        $newContent = str_replace($matchedMethod, $fix['replace'], $content);
+                        
+                        // Check PHP syntax before writing the file
+                        $isValid = $this->checkPhpSyntax($newContent);
+                        
+                        if (!$isValid) {
+                            echo "WARNING: The proposed fix contains PHP syntax errors\n";
+                            return false;
+                        } else {
+                            // No syntax errors, write the new content
+                            file_put_contents($filePath, $newContent);
+                            echo "Successfully applied fix to method {$functionName}\n";
+                            return true;
+                        }
+                    }
+                }
+            }
+            
+            // If we get here, we couldn't find a match
+            echo "Error: Could not find the target code in {$filePath}\n";
+            echo "Expected to find:\n{$fix['search']}\n";
+            return false;
+        } catch (\Exception $e) {
+            echo "Error applying fix to {$filePath}: {$e->getMessage()}\n";
+            return false;
+        }
+    }
+    
     public function processPhpunitErrors(
         ?string $testPath = null,
         ?string $filter = null,
@@ -309,128 +499,249 @@ class McpClient
         bool $autoMode = false
     ): bool {
         $iteration = 0;
-        $allTestsPassing = false;
         
-        while (!$allTestsPassing && $iteration < $maxIterations) {
-            $iteration++;
-            echo "\n=== Iteration {$iteration} of {$maxIterations} ===\n";
+        while ($iteration < $maxIterations) {
+            echo "\nIteration " . ($iteration + 1) . "/{$maxIterations}\n";
+            
+            // Get current PHPUnit output (will be used to show errors for manual fixes)
+            $phpunitOutput = $this->runPhpunitAndGetOutput($testPath);
+            echo "\nCurrent PHPUnit output:\n";
+            echo str_repeat('-', 50) . "\n";
+            
+            // Print first 15 lines of output
+            $outputLines = explode("\n", $phpunitOutput);
+            $maxLines = min(15, count($outputLines));
+            for ($i = 0; $i < $maxLines; $i++) {
+                echo $outputLines[$i] . "\n";
+            }
+            if (count($outputLines) > $maxLines) {
+                echo "... (more output not shown)\n";
+            }
+            echo str_repeat('-', 50) . "\n";
             
             // Run PHPUnit tests
             list($output, $returnCode, $batches) = $this->runPhpunitTests($testPath, $filter, $verbose);
             
-            // Display PHPUnit output
-            echo "\nPHPUnit Output:\n";
-            echo $output;
-            
             // If tests pass, we're done
             if ($returnCode === 0) {
-                echo "\nAll tests pass! No errors to fix.\n";
-                $allTestsPassing = true;
-                break;
+                echo "All PHPUnit tests pass!\n";
+                return true;
             }
             
-            // If no batches, something went wrong
-            if (empty($batches)) {
-                echo "\nNo error batches found. Cannot continue.\n";
-                break;
-            }
-            
-            // Process each batch
-            $batchCount = count($batches);
-            echo "\nFound {$batchCount} error batch(es) to process.\n";
-            
-            $fixesApplied = false;
+            // If there are failures, process them in batches
+            echo "Found " . count($batches) . " batches of test failures\n";
             
             foreach ($batches as $batchIdx => $batch) {
-                echo "\nProcessing batch " . ($batchIdx + 1) . " of {$batchCount}...\n";
+                echo "\nProcessing batch " . ($batchIdx + 1) . "/" . count($batches) . "\n";
                 
-                // Prepare message for Claude
+                // Prepare MCP message
                 $message = $this->prepareMcpMessage($batch);
+                
+                // Add the current PHPUnit output to the message
+                $message['phpunit_output'] = $phpunitOutput;
                 
                 // Send to Claude
                 $response = $this->sendToClaude($message);
                 
-                // Display Claude's response
-                echo "\nClaude's Analysis:\n";
-                echo substr($response['message'], 0, 500) . "...\n";
-                
-                // Check if there are fixes
-                if (empty($response['fixes'])) {
-                    echo "\nNo fixes suggested for this batch.\n";
-                    continue;
-                }
-                
-                echo "\nClaude suggested " . count($response['fixes']) . " fix(es).\n";
-                
-                // Apply fixes
-                foreach ($response['fixes'] as $fixIdx => $fix) {
-                    echo "\nApplying fix " . ($fixIdx + 1) . " of " . count($response['fixes']) . "...\n";
+                // Display Claude's suggested fixes in a more user-friendly format
+                if ($response['status'] === 'success') {
+                    echo "\n============= CLAUDE'S ANALYSIS AND SUGGESTED FIXES =============\n";
+                    $suggestion = $response['message'];
+                    echo $suggestion . "\n";
+                    echo "\n==============================================================\n";
                     
-                    $filePath = $fix['file_path'];
-                    $search = $fix['search'];
-                    $replace = $fix['replace'];
-                    
-                    // Get full path
-                    $fullPath = $this->projectPath . '/' . $filePath;
-                    
-                    if (!file_exists($fullPath)) {
-                        echo "Error: File not found: {$fullPath}\n";
-                        continue;
-                    }
-                    
-                    // Read file content
-                    $fileContent = file_get_contents($fullPath);
-                    
-                    // Check if search string exists
-                    if (strpos($fileContent, $search) === false) {
-                        echo "Error: Search string not found in {$filePath}\n";
-                        continue;
-                    }
-                    
-                    // Replace content
-                    $newContent = str_replace($search, $replace, $fileContent);
-                    
-                    // Check syntax of new content
-                    if (!$this->checkPhpSyntax($newContent)) {
-                        echo "Error: The suggested fix would create a syntax error. Skipping.\n";
-                        continue;
-                    }
-                    
-                    // Ask for confirmation if not in auto mode
-                    if (!$autoMode) {
-                        echo "\nFile: {$filePath}\n";
-                        echo "Search:\n{$search}\n";
-                        echo "Replace with:\n{$replace}\n";
-                        echo "Apply this fix? (y/n): ";
-                        $input = trim(fgets(STDIN));
+                    // Check if we have structured fixes
+                    if (!empty($response['fixes'])) {
+                        echo "\nClaude suggested " . count($response['fixes']) . " fixes to apply\n";
                         
-                        if (strtolower($input) !== 'y') {
-                            echo "Fix skipped.\n";
-                            continue;
+                        // Debug: Show the raw fixes for inspection
+                        echo "\n===== RAW FIX DETAILS FOR DEBUGGING =====\n";
+                        foreach ($response['fixes'] as $fixIdx => $fix) {
+                            echo "\nFix " . ($fixIdx + 1) . ":\n";
+                            echo "File: {$fix['file_path']}\n";
+                            echo "Search:\n";
+                            echo $fix['search'] . "\n";
+                            echo "Replace:\n";
+                            echo $fix['replace'] . "\n";
+                            
+                            // Check this fix for known issues
+                            if (preg_match('/(public|private|protected)\s+(public|private|protected)\s+/', $fix['replace'], $matches)) {
+                                echo "WARNING: Detected duplicate access modifiers in fix: {$matches[0]}\n";
+                            }
+                        }
+                        echo "=========================================\n";
+                        
+                        // List files that will be modified
+                        $filesToModify = array_unique(array_column($response['fixes'], 'file_path'));
+                        echo "\nFiles that would be modified:\n";
+                        foreach ($filesToModify as $file) {
+                            echo "  - {$file}\n";
+                        }
+                        
+                        // In auto_mode, apply the fixes automatically without asking
+                        if ($autoMode) {
+                            echo "\nAuto mode enabled. Applying fixes automatically...\n";
+                            $appliedFixes = [];
+                            foreach ($response['fixes'] as $fixIdx => $fix) {
+                                echo "\nApplying fix " . ($fixIdx + 1) . "/" . count($response['fixes']) . ":\n";
+                                
+                                // Pre-check for common PHP syntax issues before attempting to apply
+                                
+                                // Check for duplicate access modifiers with more patterns
+                                // First do a direct check for the known problematic pattern
+                                if (strpos($fix['replace'], 'public public function') !== false) {
+                                    echo "WARNING: Fix contains 'public public function'. Fixing...\n";
+                                    $fix['replace'] = str_replace('public public function', 'public function', $fix['replace']);
+                                    echo "Modified replace content:\n";
+                                    echo $fix['replace'] . "\n";
+                                }
+                                
+                                // Then check for other variations with regex
+                                $patterns = [
+                                    '/public\s+public\s+/' => 'public ',
+                                    '/protected\s+protected\s+/' => 'protected ',
+                                    '/private\s+private\s+/' => 'private ',
+                                    '/public\s+protected\s+/' => 'protected ',
+                                    '/protected\s+public\s+/' => 'protected ',
+                                    '/public\s+private\s+/' => 'private ',
+                                    '/private\s+public\s+/' => 'private '
+                                ];
+                                
+                                foreach ($patterns as $pattern => $replacement) {
+                                    if (preg_match($pattern, $fix['replace'])) {
+                                        echo "WARNING: Fix contains duplicate modifiers: '{$pattern}'. Fixing...\n";
+                                        $fix['replace'] = preg_replace($pattern, $replacement, $fix['replace']);
+                                        echo "Modified replace content:\n";
+                                        echo $fix['replace'] . "\n";
+                                    }
+                                }
+                                
+                                $success = $this->applyFix($fix);
+                                if ($success) {
+                                    $appliedFixes[] = $fix;
+                                }
+                            }
+                            
+                            if (!empty($appliedFixes)) {
+                                // After applying fixes, run PHPUnit again to see if we've made progress
+                                echo "\nRunning PHPUnit after applying fixes...\n";
+                                $newPhpunitOutput = $this->runPhpunitAndGetOutput($testPath);
+                                echo "\nPHPUnit output after fixes:\n";
+                                echo str_repeat('-', 50) . "\n";
+                                
+                                // Print first 15 lines of new output
+                                $newOutputLines = explode("\n", $newPhpunitOutput);
+                                $maxLines = min(15, count($newOutputLines));
+                                for ($i = 0; $i < $maxLines; $i++) {
+                                    echo $newOutputLines[$i] . "\n";
+                                }
+                                if (count($newOutputLines) > $maxLines) {
+                                    echo "... (more output not shown)\n";
+                                }
+                                echo str_repeat('-', 50) . "\n";
+                            }
+                        } else {
+                            // Ask the user if they want to apply the suggested fixes
+                            try {
+                                echo "\nWould you like to apply these fixes? (y/n): ";
+                                $userInput = trim(fgets(STDIN));
+                                
+                                if (strtolower($userInput) === 'y' || strtolower($userInput) === 'yes') {
+                                    echo "\nApplying fixes...\n";
+                                    $appliedFixes = [];
+                                    foreach ($response['fixes'] as $fixIdx => $fix) {
+                                        echo "\nApplying fix " . ($fixIdx + 1) . "/" . count($response['fixes']) . ":\n";
+                                        $success = $this->applyFix($fix);
+                                        if ($success) {
+                                            $appliedFixes[] = $fix;
+                                        }
+                                    }
+                                    
+                                    if (!empty($appliedFixes)) {
+                                        // After applying fixes, run PHPUnit again to see if we've made progress
+                                        echo "\nRunning PHPUnit after applying fixes...\n";
+                                        $newPhpunitOutput = $this->runPhpunitAndGetOutput($testPath);
+                                        echo "\nPHPUnit output after fixes:\n";
+                                        echo str_repeat('-', 50) . "\n";
+                                        
+                                        // Print first 15 lines of new output
+                                        $newOutputLines = explode("\n", $newPhpunitOutput);
+                                        $maxLines = min(15, count($newOutputLines));
+                                        for ($i = 0; $i < $maxLines; $i++) {
+                                            echo $newOutputLines[$i] . "\n";
+                                        }
+                                        if (count($newOutputLines) > $maxLines) {
+                                            echo "... (more output not shown)\n";
+                                        }
+                                        echo str_repeat('-', 50) . "\n";
+                                    }
+                                } else {
+                                    echo "\nYou chose not to apply the fixes. Continuing to the next batch...\n";
+                                }
+                            } catch (\Exception $e) {
+                                // If input fails, fall back to auto_mode behavior
+                                echo "\nInput not available. Applying fixes automatically...\n";
+                                $appliedFixes = [];
+                                foreach ($response['fixes'] as $fixIdx => $fix) {
+                                    echo "\nApplying fix " . ($fixIdx + 1) . "/" . count($response['fixes']) . ":\n";
+                                    $success = $this->applyFix($fix);
+                                    if ($success) {
+                                        $appliedFixes[] = $fix;
+                                    }
+                                }
+                                
+                                if (!empty($appliedFixes)) {
+                                    // After applying fixes, run PHPUnit again to see if we've made progress
+                                    echo "\nRunning PHPUnit after applying fixes...\n";
+                                    $newPhpunitOutput = $this->runPhpunitAndGetOutput($testPath);
+                                    echo "\nPHPUnit output after fixes:\n";
+                                    echo str_repeat('-', 50) . "\n";
+                                    echo (strlen($newPhpunitOutput) > 500 ? substr($newPhpunitOutput, 0, 500) . "..." : $newPhpunitOutput) . "\n";
+                                    echo str_repeat('-', 50) . "\n";
+                                }
+                            }
+                        }
+                    } else {
+                        // If no structured fixes were extracted, fall back to the previous behavior
+                        echo "\nNo structured fixes were found in Claude's response.\n";
+                        echo "You may need to apply fixes manually or try again.\n";
+                        
+                        // Identify files that might need to be modified based on the suggestion
+                        $potentialFiles = [];
+                        foreach (explode("\n", $suggestion) as $line) {
+                            if (strpos($line, '.php') !== false) {
+                                $parts = explode(' ', $line);
+                                foreach ($parts as $part) {
+                                    if (strpos($part, '.php') !== false) {
+                                        // Extract just the filename part
+                                        $filename = trim($part, '."\'(),;:');
+                                        if (substr($filename, -4) === '.php') {
+                                            $potentialFiles[] = $filename;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (!empty($potentialFiles)) {
+                            echo "\nFiles that might need to be modified (based on Claude's analysis):\n";
+                            foreach (array_unique($potentialFiles) as $file) {
+                                echo "  - {$file}\n";
+                            }
                         }
                     }
-                    
-                    // Apply the fix
-                    file_put_contents($fullPath, $newContent);
-                    echo "Fix applied to {$filePath}\n";
-                    $fixesApplied = true;
+                } else {
+                    echo "\nClaude encountered an error with the following message:\n";
+                    echo json_encode($response, JSON_PRETTY_PRINT) . "\n";
                 }
             }
             
-            // If no fixes were applied, we can't make progress
-            if (!$fixesApplied) {
-                echo "\nNo fixes were applied in this iteration. Cannot make further progress.\n";
-                break;
-            }
+            // Increment iteration counter
+            $iteration++;
         }
         
-        // Final status
-        if ($allTestsPassing) {
-            echo "\nSuccess! All PHPUnit tests pass after {$iteration} iteration(s).\n";
-            return true;
-        } else {
-            echo "\nCould not fix all PHPUnit tests after {$iteration} iteration(s).\n";
-            return false;
-        }
+        // If we've reached max_iterations, we've failed to fix all errors
+        echo "Reached maximum iterations ({$maxIterations}) without fixing all test failures\n";
+        return false;
     }
 }
