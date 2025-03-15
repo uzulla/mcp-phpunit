@@ -25,51 +25,6 @@ python src/main.py /path/to/php/project [options]
 
 ## Integration with Claude Code
 
-### Using with Claude Code API
-
-To use this tool with Claude Code, you can integrate it into your workflow as follows:
-
-1. **Run PHPUnit tests and capture errors**:
-   ```bash
-   python src/main.py /path/to/php/project --dry-run > phpunit_errors.json
-   ```
-
-2. **Send errors to Claude Code**:
-   ```python
-   import json
-   import anthropic
-
-   # Load the PHPUnit errors
-   with open('phpunit_errors.json', 'r') as f:
-       phpunit_errors = json.load(f)
-
-   # Initialize Claude client
-   client = anthropic.Anthropic(api_key="your_api_key")
-
-   # Prepare the message for Claude
-   message = f"""
-   I'm having issues with my PHP tests. Here are the PHPUnit errors:
-   
-   ```json
-   {json.dumps(phpunit_errors, indent=2)}
-   ```
-   
-   Can you help me fix these issues?
-   """
-
-   # Send to Claude
-   response = client.messages.create(
-       model="claude-3-opus-20240229",
-       max_tokens=1000,
-       messages=[
-           {"role": "user", "content": message}
-       ]
-   )
-
-   # Print Claude's response
-   print(response.content[0].text)
-   ```
-
 ### Using with Claude Code in MCP
 
 If you're using Claude Code in an MCP-enabled environment:
