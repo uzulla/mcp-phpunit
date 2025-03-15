@@ -1,0 +1,32 @@
+{
+    "name": "uzulla/mcp-phpunit",
+    "description": "MCP PHPUnit Integration for Claude Code",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "guzzlehttp/guzzle": "^7.0",
+        "vlucas/phpdotenv": "^5.3",
+        "symfony/console": "^5.4",
+        "symfony/process": "^5.4"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Uzulla\\McpPhpunit\\": "src/"
+        },
+        "files": [
+            "src/PhpUnitRunner/functions.php",
+            "src/ErrorFormatter/functions.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Uzulla\\McpPhpunit\\Tests\\": "tests/"
+        }
+    },
+    "bin": [
+        "bin/mcp-phpunit"
+    ]
+}
